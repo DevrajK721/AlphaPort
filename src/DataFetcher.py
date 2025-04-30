@@ -74,7 +74,9 @@ class DataFetcher:
         data_dir = os.path.join(project_root, 'data')
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
-            
+        
+        self.volatilities = {}
+
         for ticker in tqdm(self.tickers, desc="Fetching Crypto Data", unit="pair",
             ncols=80, bar_format="{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
             colour="red", leave=True, dynamic_ncols=True):
@@ -82,6 +84,10 @@ class DataFetcher:
             ticker_file_path = os.path.join(data_dir, f"{ticker}.csv")
             if os.path.exists(ticker_file_path):
                 print(f"Data for {ticker} already exists at {ticker_file_path}. Skipping download.")
+                # Load existing data to calculate volatility
+                data = pd.read_csv(ticker_file_path)
+                returns = data['Close'].pct_change().dropna()
+                self.volatilities[ticker] = returns.std()
                 continue 
 
             symbol = ticker 
@@ -101,7 +107,12 @@ class DataFetcher:
             data.dropna(inplace=True)
             data.rename(columns={'Open Time': 'Time'}, inplace=True)
             data.to_csv(ticker_file_path, index=False) # Save to CSV 
-        
+            # Calculate volatility based on the trading frequency without scaling
+            # Just use the standard deviation of returns for the native frequency
+            returns = data['Close'].pct_change().dropna()
+            self.volatilities[ticker] = returns.std()
+            
+
         print("All Historical Data Fetched and Saved Successfully.")
 
         for ticker in tqdm(self.tickers, desc="Fetching Test Crypto Data", unit="pair",

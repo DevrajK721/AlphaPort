@@ -87,14 +87,14 @@ class TestStrategy(bt.Strategy):
             )
 
 
-def run_backtest():
+def run_backtest(dataset: str, verbose: bool = False):
     cerebro = bt.Cerebro()
     cerebro.addstrategy(TestStrategy)
-    cerebro.broker.setcash(600.0)
+    cerebro.broker.setcash(100.0)
 
     # Load minute data but compress into 1-hour bars
     data = GenericCSVData(
-        dataname="../data/DOTUSDT_TESTING.csv",
+        dataname=dataset,
         timeframe=bt.TimeFrame.Minutes,
         compression=60,    # 60 × 1-minute = 1-hour bars
     )
@@ -136,19 +136,22 @@ def run_backtest():
 
     # Max Drawdown
     draw = strat.analyzers.drawdown.get_analysis()["max"]["drawdown"]
+    
+    if verbose:
+        print(f"{'='*20} DATA BACKTEST RESULTS {'='*20}")
+        print(f"Final Portfolio Value: {final_value:.2f}")
+        if sharpe_h is not None:
+            print(f"Sharpe Ratio (hourly): {sharpe_h:.4f}")
+        else:
+            print("Sharpe Ratio (hourly): N/A")
+        if avg_daily_ret is not None:
+            print(f"Average Daily Return: {avg_daily_ret:.2f}%")
+        else:
+            print("Average Daily Return: N/A")
+        print(f"Max Drawdown: {draw:.2f}%")
 
-    print(f"{'='*20} DATA BACKTEST RESULTS {'='*20}")
-    print(f"Final Portfolio Value: {final_value:.2f}")
-    if sharpe_h is not None:
-        print(f"Sharpe Ratio (hourly): {sharpe_h:.4f}")
-    else:
-        print("Sharpe Ratio (hourly): N/A")
-    if avg_daily_ret is not None:
-        print(f"Average Daily Return: {avg_daily_ret:.2f}%")
-    else:
-        print("Average Daily Return: N/A")
-    print(f"Max Drawdown: {draw:.2f}%")
+    return avg_daily_ret, sharpe_h
 
 
 if __name__ == "__main__":
-    run_backtest()
+    run_backtest(dataset="../data/BTCUSDT.csv", verbose=False)
