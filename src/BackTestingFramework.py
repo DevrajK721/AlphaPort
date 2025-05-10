@@ -1,157 +1,105 @@
+# Basic backtrader implementation for when strategy is ready to be tested (SKELETON CODE)
+
+# Imports 
+import numpy as np 
 import backtrader as bt
-import math
-import numpy as np
+from backtrader.feeds import GenericCSVData
+from datetime import datetime
+import pandas as pd 
+import matplotlib.pyplot as plt
+import glob
+import os 
 
+# Define custom CSV data class
+class MyCSV(bt.feeds.GenericCSVData):
+    """Map your CSV header to Backtrader.  Only *extra* columns go in `lines`."""
+    lines  = ('ema9', 'ema26')                       # everything else is built-in
+    params = dict(
+        dtformat   ='%Y-%m-%d %H:%M:%S',             # Time column format
+        nullvalue  =float('NaN'),                   
+        datetime   =0,  open=1, high=5, low=4, close=2, volume=3, openinterest=-1,
+        ema9       =6,  ema26=7                     # map two EMA columns
+    )   
 
-# Fix CSV column mapping to match file: Time,Open,Close,Volume,Low,High
-class GenericCSVData(bt.feeds.GenericCSVData):
-    params = (
-        ("nullvalue", float("NaN")),
-        ("dtformat", "%Y-%m-%d %H:%M:%S"),
-        ("tmformat", "%H:%M:%S"),
-        ("datetime", 0),
-        ("open", 1),
-        ("high", 5),  # column index 5 is High
-        ("low", 4),  # column index 4 is Low
-        ("close", 2),  # column index 2 is Close
-        ("volume", 3),  # column index 3 is Volume
-        ("openinterest", -1),
-        ("timeframe", bt.TimeFrame.Minutes),
-        ("compression", 1),
-        ("headers", True),
-    )
+# Define the strategy (THIS IS THE SKELETON CODE SECTION)
+class EMACross(bt.Strategy):
+    params = dict( stake_perc=0.95 )                 
 
-
-# Strategy Definition - Test Case for now until we make list of all indicators we are interested in
-"""
-Example Strategy
-Disclaimer: Not realistic, just for testing purposes
-Buy when:
-- EMA(9) > EMA(21)
-- RSI(14) > 50
-- MACD Histogram > 0
-
-Sell when:
-- Any of the above conditions are not met anymore 
-"""
-
-
-class TestStrategy(bt.Strategy):
     def __init__(self):
-        # 2) Bind the close-price series so you can index it
-        self.dataclose = self.datas[0].close
-
-        self.ema9 = bt.indicators.EMA(self.dataclose, period=9)
-        self.ema21 = bt.indicators.EMA(self.dataclose, period=21)
-        self.rsi = bt.indicators.RSI(self.dataclose, period=14)
-        self.macd = bt.indicators.MACD(
-            self.dataclose, period_me1=12, period_me2=26, period_signal=9
-        )
-        self.order = None
+        self.cross   = bt.ind.CrossOver(self.data.ema9, self.data.ema26)  # +1 / −1
+        self.order   = None
+        self.portval = []                         
 
     def notify_order(self, order):
-        if order.status in [order.Completed, order.Canceled, order.Margin]:
-            self.order = None  # clear past order
+        if order.status == order.Completed:
+            act = 'BUY' if order.isbuy() else 'SELL'
+            print(f'{self.data.datetime.datetime(0)}  {act}'
+                  f' @{order.executed.price:.5f}  size={order.executed.size:.0f}')
+        self.order = None                           
 
+    # ------- main loop --------------------------------------------------------
     def next(self):
-        if self.order:
+        self.portval.append((self.datetime.datetime(0), self.broker.getvalue()))
+        if self.order:                                                
             return
 
-        price = self.dataclose[0]
-        cash = self.broker.getcash()
-        size = cash / price
+        cash, close = self.broker.getcash(), self.data.close[0]
 
-        buy_signal = (
-            self.ema9[0] > self.ema21[0]
-            and self.rsi[0] > 50
-            and (self.macd.macd[0] - self.macd.signal[0]) > 0
-            and (self.macd.macd[0] < 0) 
-            and (self.macd.signal[0] < 0)
-        )
+        if not self.position and self.cross > 0:                      
+            size = int(self.p.stake_perc * cash / close)
+            if size:
+                self.order = self.buy(size=size)
 
-        if not self.position and buy_signal:
-            self.order = self.buy(size=size)
-            print(f"BUY  @ {self.data.datetime.date(0)} price={price:.6f} size={size}")
+        elif self.position and self.cross < 0:                        
+            self.order = self.close()
 
-        # sell when any condition breaks
-        sell_signal = (
-            self.ema9[0] < self.ema21[0]
-            or self.rsi[0] < 50
-            or (self.macd.macd[0] - self.macd.signal[0]) < 0
-        )
+    def stop(self):
+        if self.position:
+            self.close()
 
-        if self.position and sell_signal:
-            self.order = self.sell(size=self.position.size)
-            print(
-                f"SELL @ {self.data.datetime.date(0)} price={price:.6f} size={self.position.size}"
-            )
+# Run Backtest and gather metrics + plot
+def run_backtest(csv_path, start_cash=600.0):
+    cerebro = bt.Cerebro(stdstats=False)
+    cerebro.broker.setcash(start_cash)
+    cerebro.broker.setcommission(commission=0.001)
+    cerebro.broker.set_coc(True)
+    cerebro.addstrategy(EMACross)
 
-
-def run_backtest(dataset: str, verbose: bool = False):
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(TestStrategy)
-    cerebro.broker.setcash(100.0)
-
-    # Load minute data but compress into 1-hour bars
-    data = GenericCSVData(
-        dataname=dataset,
-        timeframe=bt.TimeFrame.Minutes,
-        compression=60,    # 60 × 1-minute = 1-hour bars
+    data = MyCSV(
+        dataname   = csv_path,
+        timeframe  = bt.TimeFrame.Minutes,
+        compression= 1
     )
     cerebro.adddata(data)
 
-    # Hourly Sharpe
-    cerebro.addanalyzer(
-        bt.analyzers.SharpeRatio,
-        timeframe=bt.TimeFrame.Minutes,
-        compression=60,
-        riskfreerate=0.0,
-        _name="sharpe_hourly",
-    )
-    # Daily returns for average daily return calculation
-    cerebro.addanalyzer(
-        bt.analyzers.TimeReturn,
-        timeframe=bt.TimeFrame.Days,
-        compression=1,
-        _name="dailyreturns",
-    )
-    # Drawdown
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, timeframe=bt.TimeFrame.Days, _name='daily')
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, timeframe=bt.TimeFrame.Days,
+                        riskfreerate=0.0, annualize=True, _name='sharpe')
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='dd')
 
-    results = cerebro.run()
-    strat   = results[0]
+    strat = cerebro.run()[0]
 
-    final_value = cerebro.broker.getvalue()
+    daily = strat.analyzers.daily.get_analysis()
+    avg_d = np.mean(list(daily.values())) * 100 if daily else 0.0
 
-    # Hourly Sharpe
-    sharpe_h = strat.analyzers.sharpe_hourly.get_analysis().get("sharperatio", None)
+    sh    = strat.analyzers.sharpe.get_analysis().get('sharperatio')
+    sh_txt= f'{sh:.2f}' if sh is not None else 'N/A'
 
-    # Daily returns analyzer → dictionary: {date: return}
-    dr = strat.analyzers.dailyreturns.get_analysis()
-    arr_daily = np.array(list(dr.values()))
-    if arr_daily.size:
-        avg_daily_ret = arr_daily.mean() * 100
-    else:
-        avg_daily_ret = None
+    dd_max= strat.analyzers.dd.get_analysis()['max']['drawdown'] * 100
 
-    # Max Drawdown
-    draw = strat.analyzers.drawdown.get_analysis()["max"]["drawdown"]
-    
-    if verbose:
-        print(f"{'='*20} DATA BACKTEST RESULTS {'='*20}")
-        print(f"Final Portfolio Value: {final_value:.2f}")
-        if sharpe_h is not None:
-            print(f"Sharpe Ratio (hourly): {sharpe_h:.4f}")
-        else:
-            print("Sharpe Ratio (hourly): N/A")
-        if avg_daily_ret is not None:
-            print(f"Average Daily Return: {avg_daily_ret:.2f}%")
-        else:
-            print("Average Daily Return: N/A")
-        print(f"Max Drawdown: {draw:.2f}%")
+    print('\n=== Performance ===')
+    print(f'Average Daily Return:  {avg_d:.2f}%')
+    print(f'Annualized Sharpe:     {sh_txt}')
+    print(f'Max Drawdown:          {dd_max:.2f}%')
 
-    return avg_daily_ret, sharpe_h
+    # Plot results 
+    dates, equity = zip(*strat.portval)          # unpack the tuples
+    plt.figure(figsize=(12,6))
+    plt.plot(dates, equity, linewidth=1.2)
+    plt.title('Equity Curve')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
-
-if __name__ == "__main__":
-    run_backtest(dataset="../data/BTCUSDT.csv", verbose=False)
