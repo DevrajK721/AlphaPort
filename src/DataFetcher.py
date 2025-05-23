@@ -26,7 +26,7 @@ class DataFetcher:
         with open(self.secrets_path, 'r') as file:
             vals = json.load(file)
             self.binance_api_key = vals['BINANCE_API_KEY']
-            self.frequency = vals['Trading Frequency (Yearly/Monthly/Weekly/Daily/Hourly/Minutely)']
+            self.frequency = vals['Trading Frequency (Yearly/Monthly/Weekly/Daily/Hourly/15Minutely/Minutely)']
             self.binance_api_secret = vals['BINANCE_API_SECRET']
             self.end_date = vals['Ending Date (YYYY-MM-DD)']
             self.start_date = vals['Starting Date (YYYY-MM-DD)']
@@ -55,6 +55,8 @@ class DataFetcher:
             interval = BC.KLINE_INTERVAL_1DAY
         elif self.frequency == "Minutely":
             interval = BC.KLINE_INTERVAL_1MINUTE
+        elif self.frequency == '15Minutely':
+            interval = BC.KLINE_INTERVAL_15MINUTE
         elif self.frequency == 'Hourly':
             interval = BC.KLINE_INTERVAL_1HOUR
         elif self.frequency == 'Weekly':
@@ -129,7 +131,7 @@ class DataFetcher:
             'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 
             'Taker Buy Quote Asset Volume', 'Ignore']
             self.end_date = (datetime.now() - timedelta(days=0)).strftime("%Y-%m-%d")
-            self.start_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+            self.start_date = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
             data = pd.DataFrame(self.binance_client.get_historical_klines(symbol, interval, self.start_date, self.end_date), columns=columns)
             data['Open Time'] = pd.to_datetime(data['Open Time'], unit='ms')
             data['Close'] = data['Close'].astype(float)
@@ -151,131 +153,6 @@ class DataFetcher:
             data.to_csv(ticker_file_path, index=False) # Save to CSV 
         
         print("Live Historical Data Fetched and Saved Successfully.")
-
-
-    def add_indicators(self, data_dir: str = '../data'):
-        # Suffixes for the two file sets
-        for suffix in ["", "_TESTING"]:
-            for ticker in tqdm(
-                self.tickers,
-                desc=f"Adding Indicators{suffix}",
-                unit="file",
-                ncols=80,
-                bar_format="{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
-                colour="green",
-                leave=True,
-                dynamic_ncols=True
-            ):
-                path = os.path.join(data_dir, f"{ticker}{suffix}.csv")
-
-                # 1) Read CSV with Time as datetime index
-                df = pd.read_csv(path, parse_dates=["Time"], index_col="Time")
-
-                # 2) EMAs (9, 26)
-                df['EMA_9']  = df['Close'].ewm(span=9,  adjust=False).mean()
-                df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-
-                # 3) MACD (12,26,9)
-                ema_fast = df['Close'].ewm(span=12, adjust=False).mean()
-                ema_slow = df['Close'].ewm(span=26, adjust=False).mean()
-                df['MACD']        = ema_fast - ema_slow
-                df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-                # 4) RSI (14)
-                delta    = df['Close'].diff()
-                gain     = delta.clip(lower=0)
-                loss     = -delta.clip(upper=0)
-                avg_gain = gain.rolling(14).mean()
-                avg_loss = loss.rolling(14).mean()
-                rs       = avg_gain / avg_loss
-                df['RSI'] = 100 - (100 / (1 + rs))
-
-                # 5) VWAP (intraday reset)
-                tp = (df['High'] + df['Low'] + df['Close']) / 3
-                vp = tp * df['Volume']
-                df['Cum_VP'] = vp.groupby(df.index.date).cumsum()
-                df['Cum_V']  = df['Volume'].groupby(df.index.date).cumsum()
-                df['VWAP']   = df['Cum_VP'] / df['Cum_V']
-
-                # 6) Bollinger Bands (20,2)
-                m20 = df['Close'].rolling(20).mean()
-                s20 = df['Close'].rolling(20).std()
-                df['BB_Upper'] = m20 + 2 * s20
-                df['BB_Lower'] = m20 - 2 * s20
-
-                # 7) ATR (14)
-                def rma(x, n): return x.ewm(alpha=1/n, adjust=False).mean()
-                hl = df['High'] - df['Low']
-                hc = (df['High'] - df['Close'].shift()).abs()
-                lc = (df['Low']  - df['Close'].shift()).abs()
-                tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-                df['ATR_14'] = rma(tr, 14)
-
-                # 8) ADX (14)
-                up = df['High'] - df['High'].shift(1)
-                dn = df['Low'].shift(1) - df['Low']
-                pos_dm = up.where((up > dn) & (up > 0), 0)
-                neg_dm = dn.where((dn > up) & (dn > 0), 0)
-                pdi = rma(pos_dm, 14) / rma(tr, 14) * 100
-                mdi = rma(neg_dm, 14) / rma(tr, 14) * 100
-                dx  = (pdi - mdi).abs() / (pdi + mdi) * 100
-                df['ADX']  = rma(dx, 14)
-                df['+DI']  = pdi
-                df['-DI']  = mdi
-
-                # 9) OBV
-                obv = [0]
-                vol = df['Volume'].values
-                close = df['Close'].values
-                for i in range(1, len(df)):
-                    if close[i] > close[i-1]:
-                        obv.append(obv[-1] + vol[i])
-                    elif close[i] < close[i-1]:
-                        obv.append(obv[-1] - vol[i])
-                    else:
-                        obv.append(obv[-1])
-                df['OBV'] = obv
-
-                # 10) MFI (14)
-                mf = tp * df['Volume']
-                pm = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
-                nm = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
-                mfr = pm / nm
-                df['MFI'] = 100 - (100 / (1 + mfr))
-
-                # 11) Stochastic (14,3)
-                low14  = df['Low'].rolling(14).min()
-                high14 = df['High'].rolling(14).max()
-                k      = 100 * (df['Close'] - low14) / (high14 - low14)
-                df['%K'] = k
-                df['%D'] = k.rolling(3).mean()
-
-                # 12) KAMA (10,2,30)
-                n       = 10
-                fast_sc = 2/(2+1)
-                slow_sc = 2/(30+1)
-                chg     = df['Close'].diff(n).abs()
-                volsum  = df['Close'].diff().abs().rolling(n).sum()
-                er      = chg / volsum
-                sc      = (er*(fast_sc-slow_sc)+slow_sc)**2
-                kama    = [df['Close'].iat[0]]
-                for i in range(1, len(df)):
-                    kama.append(kama[-1] + sc.iat[i]*(df['Close'].iat[i]-kama[-1]))
-                df['KAMA'] = kama
-
-                # 13) Returns & lags
-                df['PCT_Returns'] = df['Close'].pct_change() * 100
-                df['Decision']    = np.where(df['PCT_Returns'] > 0.10, 1, -1)
-                for i in range(1, 6):
-                    df[f'Lag_{i}'] = df['PCT_Returns'].shift(i)
-
-                # 14) Trim warmup
-                df = df.iloc[26:]
-
-                # 15) Save back
-                df.to_csv(path)
-
-        print("Successfully added indicators to all data files.")
         
     
 
